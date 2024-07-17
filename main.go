@@ -97,6 +97,18 @@ func main() {
 			Name:  "target",
 			Usage: "The multistage build target to use",
 		},
+		cli.BoolFlag{
+			Name:  "bake",
+			Usage: "Use buildx bake instead of build",
+		},
+		cli.StringSliceFlag{
+			Name:  "cache-from",
+			Usage: "[bake] External cache sources",
+		},
+		cli.StringSliceFlag{
+			Name:  "cache-to",
+			Usage: "[bake] Cache export destinations",
+		},
 	}
 	app.Action = func(c *cli.Context) {
 		exit(run(c))
@@ -123,6 +135,7 @@ func run(c *cli.Context) error {
 		return err
 	}
 
+	dapperFile.Bake = c.Bool("bake")
 	dapperFile.Mode = c.String("mode")
 	dapperFile.Socket = c.Bool("socket")
 	dapperFile.NoOut = c.Bool("no-out")
@@ -131,6 +144,8 @@ func run(c *cli.Context) error {
 	dapperFile.NoContext = c.Bool("no-context")
 	dapperFile.MountSuffix = c.String("mount-suffix")
 	dapperFile.Target = c.String("target")
+	dapperFile.CacheFrom = c.StringSlice("cache-from")
+	dapperFile.CacheTo = c.StringSlice("cache-to")
 
 	if shell {
 		return dapperFile.Shell(c.Args())
