@@ -1,0 +1,37 @@
+name: Publish
+on:
+  release:
+    types:
+      - published
+permissions:
+    contents: write
+    id-token: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Build
+        run: ./scripts/build
+        env:
+          CROSS: "1"
+
+      - name: Upload Release Assets
+        uses: actions/checkout@v4
+        run: |
+          set -x
+          assets=()
+          for asset in ./bin/*; do
+            assets+=("-a" "$asset")
+          done
+          tag_name="${GITHUB_REF##*/}"
+          hub release create "${assets[@]}" -m "$tag_name" "$tag_name"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
