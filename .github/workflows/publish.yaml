@@ -24,13 +24,4 @@ jobs:
           CROSS: "1"
 
       - name: Upload Release Assets
-        run: |
-          set -x
-          assets=()
-          for asset in ./bin/*; do
-            assets+=("-a" "$asset")
-          done
-          tag_name="${GITHUB_REF##*/}"
-          hub release create "${assets[@]}" -m "$tag_name" "$tag_name"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload ${{ github.ref_name }} bin/*
