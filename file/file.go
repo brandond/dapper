@@ -17,6 +17,7 @@ import (
 	"syscall"
 
 	"github.com/mattn/go-isatty"
+	"github.com/rancher/dapper/bake"
 	"github.com/sirupsen/logrus"
 )
 
@@ -32,9 +33,12 @@ type Dapperfile struct {
 	env         Context
 	Socket      bool
 	NoOut       bool
-	Args        []string
+	Args        map[string]string
 	From        string
 	Quiet       bool
+	Bake        bool
+	CacheFrom   []string
+	CacheTo     []string
 	hostArch    string
 	Keep        bool
 	NoContext   bool
@@ -69,7 +73,7 @@ func (d *Dapperfile) init() error {
 	return nil
 }
 
-func (d *Dapperfile) argsFromEnv(dockerfile string) ([]string, error) {
+func (d *Dapperfile) argsFromEnv(dockerfile string) (map[string]string, error) {
 	file, err := os.Open(dockerfile)
 	if err != nil {
 		return nil, err
@@ -77,7 +81,7 @@ func (d *Dapperfile) argsFromEnv(dockerfile string) ([]string, error) {
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
-	r := []string{}
+	r := map[string]string{}
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		fields := strings.Fields(line)
@@ -102,7 +106,7 @@ func (d *Dapperfile) argsFromEnv(dockerfile string) ([]string, error) {
 		}
 
 		if value != "" {
-			r = append(r, fmt.Sprintf("%s=%s", key, value))
+			r[key] = value
 		}
 	}
 
@@ -229,6 +233,13 @@ func (d *Dapperfile) Build(args []string) error {
 }
 
 func (d *Dapperfile) build(args []string, copy bool) (string, error) {
+	if d.Bake {
+		return d.bake(args, copy)
+	}
+	return d.buildLegacy(args, copy)
+}
+
+func (d *Dapperfile) buildLegacy(args []string, copy bool) (string, error) {
 	dapperFile, err := d.dapperFile()
 	if err != nil {
 		return "", err
@@ -249,8 +260,8 @@ func (d *Dapperfile) build(args []string, copy bool) (string, error) {
 		buildArgs = append(buildArgs, "--target", d.Target)
 	}
 
-	for _, v := range d.Args {
-		buildArgs = append(buildArgs, "--build-arg", v)
+	for k, v := range d.Args {
+		buildArgs = append(buildArgs, "--build-arg", k+"="+v)
 	}
 
 	if d.NoContext {
@@ -310,6 +321,79 @@ func (d *Dapperfile) buildWithContent(tag, content string) error {
 	}()
 
 	return d.exec("build", "-t", tag, "-f", tempfile, ".")
+}
+
+func (d *Dapperfile) bake(args []string, copy bool) (string, error) {
+	if d.NoContext {
+		return "", fmt.Errorf("contextless builds are not supported by buildkit")
+	}
+
+	contextPath := "."
+	if len(args) > 0 {
+		contextPath = args[0]
+	}
+
+	tag := d.tag()
+	logrus.Debugf("Building %s using %s", tag, d.File)
+	bakefile := bake.File{
+		Groups: map[string]bake.Group{
+			"default": bake.Group{
+				Targets: []string{"stage1"},
+			},
+		},
+		Targets: map[string]bake.Target{
+			"stage1": bake.Target{
+				Context:    contextPath,
+				Tags:       []string{tag},
+				Target:     d.Target,
+				Args:       d.Args,
+				Dockerfile: d.File,
+				Outputs:    []string{"type=docker"},
+				CacheFrom:  d.CacheFrom,
+				CacheTo:    d.CacheTo,
+			},
+		},
+	}
+
+	// If not binding the source into the container, and the copy step is not explicitly disabled,
+	// add a stage2 target to copy in the source. This stage2 is what should be tagged and saved.
+	if copy && !d.IsBind() {
+		defaultGroup := bakefile.Groups["default"]
+		defaultGroup.Targets = append(defaultGroup.Targets, "stage2")
+		bakefile.Groups["default"] = defaultGroup
+
+		stage1 := bakefile.Targets["stage1"]
+		bakefile.Targets["stage2"] = bake.Target{
+			Context:          stage1.Context,
+			DockerfileInline: fmt.Sprintf("FROM stage1\nCOPY %s %s", d.env.Cp(), d.env.Source()),
+			Contexts:         map[string]string{"stage1": "target:stage1"},
+			CacheFrom:        stage1.CacheFrom,
+			CacheTo:          stage1.CacheTo,
+			Outputs:          stage1.Outputs,
+			Tags:             stage1.Tags,
+		}
+
+		// Remove stage1 from output and tag
+		stage1.Outputs = []string{"type=cacheonly"}
+		stage1.CacheTo = []string{}
+		stage1.Tags = []string{}
+		bakefile.Targets["stage1"] = stage1
+	}
+
+	b, err := json.Marshal(bakefile)
+	if err != nil {
+		return "", err
+	}
+
+	if err := d.execWithStdin(bytes.NewBuffer(b), "buildx", "bake", "-f", "-"); err != nil {
+		return "", err
+	}
+
+	if err := d.readEnv(tag); err != nil {
+		return "", err
+	}
+
+	return tag, nil
 }
 
 func (d *Dapperfile) readEnv(tag string) error {
